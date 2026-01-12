@@ -2,7 +2,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 
 from hexgrid import axial_to_cart, HEX_RADIUS
-from routing import _nearest_neighbor_order
+from db import compute_routes_gds
 
 COLORS = px.colors.qualitative.Plotly
 
@@ -48,19 +48,39 @@ def assignment_figure(data):
     fig = go.Figure()
     uavs = sorted(set(d["uav"] for d in data))
 
-    for idx, uav in enumerate(uavs):
-        pts_raw = [d for d in data if d["uav"] == uav]
-        pts = []
-        for d in pts_raw:
-            x, y = axial_to_cart(d["q"], d["r"], HEX_RADIUS)
-            pts.append({"hid": d["hid"], "x": x, "y": y, "q": d["q"], "r": d["r"], "p": d.get("p", 0)})
+    # index assigned hexes by UAV and hid for quick lookup
+    by_uav = {}
+    for d in data:
+        by_uav.setdefault(d["uav"], {})[d["hid"]] = d
 
-        if not pts:
+    # attempt to compute routes via GDS; fallback to deterministic priority ordering
+    try:
+        routes = compute_routes_gds()
+    except Exception as e:
+        print(f"GDS routing call failed: {e}")
+        routes = {}
+
+    for idx, uav in enumerate(uavs):
+        ordered_rows = []
+
+        if uav in routes and routes[uav]:
+            # map route hex ids to the original rows (skip missing ids)
+            ordered_rows = [by_uav[uav].get(hid) for hid in routes[uav] if by_uav[uav].get(hid)]
+        else:
+            # deterministic fallback: sort by priority desc then hid
+            ordered_rows = sorted([d for d in data if d["uav"] == uav], key=lambda x: (-x.get("p", 0), x["hid"]))
+
+        if not ordered_rows:
             continue
 
-        ordered = _nearest_neighbor_order(pts)
-        xs = [p["x"] for p in ordered]
-        ys = [p["y"] for p in ordered]
+        xs = []
+        ys = []
+        ordered = []
+        for d in ordered_rows:
+            x, y = axial_to_cart(d["q"], d["r"], HEX_RADIUS)
+            xs.append(x)
+            ys.append(y)
+            ordered.append({"hid": d["hid"], "x": x, "y": y, "p": d.get("p", 0)})
 
         color = COLORS[idx % len(COLORS)] if COLORS else None
 
